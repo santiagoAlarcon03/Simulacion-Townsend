@@ -1,4 +1,4 @@
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from enum import Enum, auto
 
 import numpy as np
@@ -50,3 +50,5 @@ class SimulationState:
     stage: Stage
     collision_events: int = 0
     ionization_events: int = 0
+    neutral_positions: np.ndarray = field(default_factory=lambda: np.zeros((0, 3), dtype=float))
+    neutral_velocities: np.ndarray = field(default_factory=lambda: np.zeros((0, 3), dtype=float))

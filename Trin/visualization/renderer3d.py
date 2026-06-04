@@ -7,7 +7,10 @@ class Renderer3D:
         self.available = False
         self.widget = QLabel("3D view requires PyVistaQt.")
         self._plotter = None
-        self._mesh = None
+        self._electron_mesh = None
+        self._electron_actor = None
+        self._neutral_mesh = None
+        self._neutral_actor = None
         self._domain_actor = None
 
         try:
@@ -24,31 +27,59 @@ class Renderer3D:
         self._plotter.set_background("black")
         self._plotter.add_axes()
 
-        self._mesh = pv.PolyData(np.zeros((1, 3)))
         self._first_render = True
-        self._plotter.add_points(
-            self._mesh,
+        self._electron_mesh = pv.PolyData(np.zeros((1, 3)))
+        self._neutral_mesh = None
+        self._electron_actor = self._plotter.add_mesh(
+            self._electron_mesh,
             render_points_as_spheres=True,
-            point_size=10,
+            point_size=12,
             color="yellow",
         )
+        self._neutral_actor = None
         self._plotter.view_isometric()
 
         self._set_default_domain()
 
-    def update_particles(self, positions) -> None:
+    def update_particles(self, electron_positions, neutral_positions=None) -> None:
         if not self.available:
             return
-        if positions is None or len(positions) == 0:
-            points = np.zeros((1, 3))
+        if electron_positions is None or len(electron_positions) == 0:
+            electron_points = np.empty((0, 3))
         else:
-            points = np.asarray(positions, dtype=float)
-        self._mesh.points = points
-        self._mesh.Modified()
+            electron_points = np.asarray(electron_positions, dtype=float)
+
+        if neutral_positions is None or len(neutral_positions) == 0:
+            neutral_points = np.empty((0, 3))
+        else:
+            neutral_points = np.asarray(neutral_positions, dtype=float)
+
+        self._replace_actor("electron", electron_points, "yellow")
+        self._replace_actor("neutral", neutral_points, "dodgerblue")
         if self._first_render:
             self._plotter.reset_camera()
             self._first_render = False
         self._plotter.render()
+
+    def _replace_actor(self, kind: str, points: np.ndarray, color: str) -> None:
+        actor_attr = f"_{kind}_actor"
+        mesh_attr = f"_{kind}_mesh"
+        actor = getattr(self, actor_attr)
+        if actor is not None:
+            self._plotter.remove_actor(actor)
+        if points.size == 0:
+            setattr(self, mesh_attr, None)
+            setattr(self, actor_attr, None)
+            return
+        mesh = self._pv.PolyData(points)
+        actor = self._plotter.add_mesh(
+            mesh,
+            render_points_as_spheres=True,
+            point_size=12,
+            color=color,
+        )
+        setattr(self, mesh_attr, mesh)
+        setattr(self, actor_attr, actor)
 
     def set_domain(self, xy_extent: float, gap_distance: float) -> None:
         if not self.available:
@@ -93,7 +124,18 @@ class Renderer3D:
     def clear(self) -> None:
         if not self.available:
             return
-        self._mesh.points = np.zeros((1, 3))
-        self._mesh.Modified()
+        if self._electron_actor is not None:
+            self._plotter.remove_actor(self._electron_actor)
+        if self._neutral_actor is not None:
+            self._plotter.remove_actor(self._neutral_actor)
+        self._electron_mesh = self._pv.PolyData(np.zeros((1, 3)))
+        self._neutral_mesh = None
+        self._electron_actor = self._plotter.add_mesh(
+            self._electron_mesh,
+            render_points_as_spheres=True,
+            point_size=12,
+            color="yellow",
+        )
+        self._neutral_actor = None
         self._first_render = True
         self._plotter.render()

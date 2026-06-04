@@ -38,6 +38,8 @@ class MainWindow(QMainWindow):
         self.controls.start_requested.connect(self.start_simulation)
         self.controls.pause_toggled.connect(self.set_paused)
         self.controls.reset_requested.connect(self.reset_simulation)
+        self.controls.add_electron_requested.connect(self.add_electron)
+        self.controls.add_neutral_requested.connect(self.add_neutral)
 
         self.timer = QTimer(self)
         self.timer.setInterval(self.config.frame_dt_ms)
@@ -66,7 +68,7 @@ class MainWindow(QMainWindow):
         self._running = False
         self.controls.set_pause_state(True)
         if self.engine.state is not None:
-            self.view.update_particles(self.engine.state.positions)
+            self.view.update_particles(self.engine.state.positions, self.engine.state.neutral_positions)
             self.controls.set_stage_readback(self.engine.state.stage)
         self.plot_panel.update_plot(self.logger.times, self.logger.counts)
 
@@ -77,6 +79,24 @@ class MainWindow(QMainWindow):
         if state is None or metrics is None:
             return
         self.logger.log(state.time, metrics["count"], metrics["current"])
-        self.view.update_particles(state.positions)
+        self.view.update_particles(state.positions, state.neutral_positions)
         self.controls.set_stage_readback(state.stage)
         self.plot_panel.update_plot(self.logger.times, self.logger.counts)
+
+    def add_electron(self) -> None:
+        """Add a single free electron into the current simulation state."""
+        # Delegate to engine
+        self.engine.add_electron()
+        # Update view and readbacks immediately
+        if self.engine.state is not None:
+            self.view.update_particles(self.engine.state.positions, self.engine.state.neutral_positions)
+            self.controls.set_stage_readback(self.engine.state.stage)
+            self.plot_panel.update_plot(self.logger.times, self.logger.counts)
+
+    def add_neutral(self) -> None:
+        """Add a neutral particle to the current simulation state."""
+        self.engine.add_neutral()
+        if self.engine.state is not None:
+            self.view.update_particles(self.engine.state.positions, self.engine.state.neutral_positions)
+            self.controls.set_stage_readback(self.engine.state.stage)
+            self.plot_panel.update_plot(self.logger.times, self.logger.counts)

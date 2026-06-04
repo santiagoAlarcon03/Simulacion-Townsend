@@ -20,6 +20,7 @@ class SimulationConfig:
     secondary_emission_gamma: float = 0.02
     ionization_energy_ev: float = 15.6
     collision_frequency: float = 5.0e10
+    neutral_collision_radius: float = 6.0e-4
     ionization_probability: float = 0.02
     seed: Optional[int] = 1234
     start_stage: Stage = Stage.INITIAL_ELECTRONS

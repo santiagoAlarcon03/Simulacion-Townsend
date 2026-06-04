@@ -18,6 +18,8 @@ class ControlsPanel(QWidget):
     start_requested = pyqtSignal()
     pause_toggled = pyqtSignal(bool)
     reset_requested = pyqtSignal()
+    add_electron_requested = pyqtSignal()
+    add_neutral_requested = pyqtSignal()
 
     def __init__(self, parent: QWidget | None = None) -> None:
         super().__init__(parent)
@@ -33,6 +35,8 @@ class ControlsPanel(QWidget):
         self.pause_button = QPushButton("Pause")
         self.pause_button.setCheckable(True)
         self.reset_button = QPushButton("Reset")
+        self.add_electron_button = QPushButton("Agregar electrón libre")
+        self.add_neutral_button = QPushButton("Agregar partícula neutra")
 
         self.stage_value = QLabel("-")
 
@@ -43,6 +47,8 @@ class ControlsPanel(QWidget):
 
         buttons = QHBoxLayout()
         buttons.addWidget(self.start_button)
+        buttons.addWidget(self.add_electron_button)
+        buttons.addWidget(self.add_neutral_button)
         buttons.addWidget(self.pause_button)
         buttons.addWidget(self.reset_button)
 
@@ -56,6 +62,8 @@ class ControlsPanel(QWidget):
         layout.addStretch(1)
 
         self.start_button.clicked.connect(self.start_requested.emit)
+        self.add_electron_button.clicked.connect(self.add_electron_requested.emit)
+        self.add_neutral_button.clicked.connect(self.add_neutral_requested.emit)
         self.pause_button.toggled.connect(self._on_pause_toggled)
         self.reset_button.clicked.connect(self.reset_requested.emit)
 

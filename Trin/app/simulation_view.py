@@ -12,8 +12,8 @@ class SimulationView(QWidget):
         layout.setContentsMargins(0, 0, 0, 0)
         layout.addWidget(self.renderer.widget)
 
-    def update_particles(self, positions) -> None:
-        self.renderer.update_particles(positions)
+    def update_particles(self, electron_positions, neutral_positions=None) -> None:
+        self.renderer.update_particles(electron_positions, neutral_positions)
 
     def set_domain(self, xy_extent: float, gap_distance: float) -> None:
         self.renderer.set_domain(xy_extent, gap_distance)
