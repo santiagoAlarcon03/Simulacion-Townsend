@@ -29,11 +29,14 @@ class EngineTests(unittest.TestCase):
         config = SimulationConfig()
         engine = SimulationEngine(config)
         engine.reset(Stage.INITIAL_ELECTRONS, 2)
+        # Only test lateral (X/Y) reflection; Z boundaries are now absorbing electrodes
         engine.state.positions[:] = 0.0
-        engine.state.positions[0, 0] = config.xy_extent * 1.2
+        engine.state.positions[0, 0] = config.xy_extent * 1.2  # Over X boundary
         engine.state.velocities[:] = 0.0
+        engine.state.neutral_positions = engine.state.neutral_positions[:0]
         state, _ = engine.step(config.dt)
         self.assertIsNotNone(state)
+        # Both electrons remain because they did not hit the anode
         self.assertEqual(state.positions.shape[0], 2)
 
     def test_add_neutral_particle(self):
@@ -58,6 +61,8 @@ class EngineTests(unittest.TestCase):
         state, _ = engine.step(config.dt)
         self.assertIsNotNone(state)
         self.assertGreater(state.positions.shape[0], before)
+        # Verify that a positive ion is also created
+        self.assertEqual(state.ion_positions.shape[0], 1)
 
 
 if __name__ == "__main__":
