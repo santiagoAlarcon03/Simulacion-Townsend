@@ -7,7 +7,7 @@ la simulación para su posterior análisis.
 Actualmente registra:
 
 - Tiempo de simulación.
-- Número de partículas.
+- Número de partículas (electrones e iones).
 - Corriente eléctrica.
 
 Estos datos pueden utilizarse para generar gráficas
@@ -42,8 +42,11 @@ class DataLogger:
         # Tiempo transcurrido (s)
         self.times = []
 
-        # Número de partículas
+        # Número de partículas (Electrones)
         self.counts = []
+
+        # 🔄 NUEVO: Número de iones positivos
+        self.ion_counts = []
 
         # Corriente eléctrica (A)
         self.currents = []
@@ -52,7 +55,8 @@ class DataLogger:
         self,
         time_s: float,
         count: int,
-        current_a: float
+        current_a: float,
+        ion_count: int = 0  # 🔄 NUEVO: Con valor por defecto para evitar errores
     ) -> None:
         """
         Registra un nuevo punto de datos.
@@ -67,8 +71,12 @@ class DataLogger:
 
         current_a : float
             Corriente instantánea en amperios.
+            
+        ion_count : int, opcional
+            Número de iones positivos. Por defecto es 0.
         """
 
         self.times.append(float(time_s))
         self.counts.append(int(count))
         self.currents.append(float(current_a))
+        self.ion_counts.append(int(ion_count)) # 🔄 NUEVO: Guarda el historial de iones

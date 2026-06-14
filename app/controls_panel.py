@@ -6,6 +6,7 @@ la interfaz gráfica para controlar la simulación:
 
 - Seleccionar la etapa inicial.
 - Definir el número inicial de partículas.
+- Definir la cantidad de partículas neutras de fondo.
 - Iniciar la simulación.
 - Pausar/Reanudar la simulación.
 - Reiniciar la simulación.
@@ -86,7 +87,7 @@ class ControlsPanel(QWidget):
             self.stage_combo.addItem(label, stage)
 
         # ------------------------------------------------------------
-        # Selector de cantidad inicial de partículas
+        # Selector de cantidad inicial de partículas (Electrones Semilla)
         # ------------------------------------------------------------
         self.particle_spin = QSpinBox()
 
@@ -95,6 +96,17 @@ class ControlsPanel(QWidget):
 
         # Valor inicial por defecto.
         self.particle_spin.setValue(200)
+
+        # ------------------------------------------------------------
+        # ⚛️ NUEVO: Selector de cantidad de partículas neutras de fondo
+        # ------------------------------------------------------------
+        self.neutral_spin = QSpinBox()
+        
+        # Rango amplio para el fondo de gas neutro
+        self.neutral_spin.setRange(0, 50000)
+        
+        # Valor inicial por defecto razonable
+        self.neutral_spin.setValue(1000)
 
         # ------------------------------------------------------------
         # Botones de control
@@ -130,6 +142,7 @@ class ControlsPanel(QWidget):
 
         form.addRow("Start stage", self.stage_combo)
         form.addRow("Initial particles", self.particle_spin)
+        form.addRow("Initial neutrals", self.neutral_spin) # ⚛️ Añadido al diseño del formulario
         form.addRow("Current stage", self.stage_value)
 
         # ------------------------------------------------------------
@@ -186,83 +199,41 @@ class ControlsPanel(QWidget):
         self.reset_button.clicked.connect(self.reset_requested.emit)
 
     def _on_pause_toggled(self, checked: bool) -> None:
-        """
-        Gestiona el cambio de estado del botón de pausa.
-
-        Cuando el botón está activado:
-            Pause -> Resume
-
-        Cuando vuelve a desactivarse:
-            Resume -> Pause
-
-        Además emite una señal indicando el nuevo estado.
-
-        Parámetros
-        ----------
-        checked : bool
-            True si la simulación está pausada.
-            False si la simulación está en ejecución.
-        """
+        """Gestiona el cambio de estado del botón de pausa."""
         self.pause_button.setText("Resume" if checked else "Pause")
         self.pause_toggled.emit(checked)
 
     def selected_stage(self) -> Stage:
-        """
-        Obtiene la etapa seleccionada actualmente por el usuario.
-
-        Retorna
-        -------
-        Stage
-            Etapa seleccionada en el ComboBox.
-        """
+        """Obtiene la etapa seleccionada actualmente por el usuario."""
         data = self.stage_combo.currentData(Qt.ItemDataRole.UserRole)
 
         return data if isinstance(data, Stage) else Stage.INITIAL_ELECTRONS
 
     def particle_count(self) -> int:
+        """Obtiene la cantidad de partículas (electrones semilla) configurada por el usuario."""
+        return int(self.particle_spin.value())
+
+    # ⚛️ NUEVO MÉTODO DE LECTURA DE NEUTRAS
+    def neutral_particle_count(self) -> int:
         """
-        Obtiene la cantidad de partículas configurada por el usuario.
+        Obtiene la cantidad de partículas neutras configurada por el usuario.
 
         Retorna
         -------
         int
-            Número inicial de partículas.
+            Número inicial de partículas neutras de fondo.
         """
-        return int(self.particle_spin.value())
+        return int(self.neutral_spin.value())
 
     def set_pause_state(self, paused: bool) -> None:
-        """
-        Actualiza visualmente el estado del botón de pausa
-        sin emitir señales.
-
-        Se utiliza normalmente cuando la simulación cambia de
-        estado desde otro componente del programa.
-
-        Parámetros
-        ----------
-        paused : bool
-            True si la simulación está pausada.
-            False si la simulación está ejecutándose.
-        """
-
-        # Evita disparar señales mientras se modifica el botón.
+        """Actualiza visualmente el estado del botón de pausa sin emitir señales."""
         self.pause_button.blockSignals(True)
-
         self.pause_button.setChecked(paused)
         self.pause_button.setText("Resume" if paused else "Pause")
-
         self.pause_button.blockSignals(False)
 
     def set_stage_readback(self, stage: Stage) -> None:
-        """
-        Actualiza la etiqueta que muestra la etapa actual
-        de la simulación.
-
-        Parámetros
-        ----------
-        stage : Stage
-            Etapa actual de la simulación.
-        """
+        """Actualiza la etiqueta que muestra la etapa actual de la simulación."""
         self.stage_value.setText(
             STAGE_LABELS.get(stage, "Unknown")
         )

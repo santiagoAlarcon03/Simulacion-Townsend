@@ -33,12 +33,14 @@ class SimulationEngine:
         self.initial_count = config.initial_particles
 
 
-    def reset(self, stage: Stage, n_particles: int) -> None:
+    def reset(self, stage: Stage, n_particles: int, neutral_count: int = None) -> None:
         """Reinicia el estado de la simulación configurando una nueva etapa y partículas libres.
 
         Args:
             stage (Stage): La etapa de la simulación con la que se desea comenzar.
             n_particles (int): Cantidad base de electrones iniciales.
+            neutral_count (int, opcional): Cantidad de partículas neutras de fondo. 
+                                          Si es None, se usará el valor por defecto de 500.
         """
         # Determina la cantidad real de electrones según la etapa seleccionada
         count = self._initial_count_for_stage(stage, n_particles)
@@ -50,10 +52,13 @@ class SimulationEngine:
             self.rng,
         )
 
-        # Inicializa el fondo de gas neutro (partículas estables contra las que chocan los electrones)
+        # ⚛️ Determina cuántas neutras crear: usa el valor de la interfaz o 500 si viene vacío
+        n_neutrals = neutral_count if neutral_count is not None else 500
+
+        # Inicializa el fondo de gas neutro dinámicamente
         neutral_positions, neutral_velocities = (
             particles.initialize_neutral_particles(
-                500,  # Cantidad fija de partículas de gas neutro para la simulación
+                n_neutrals,  # 🔄 ¡Ahora es completamente dinámico!
                 self.config,
                 self.rng,
             )
@@ -61,18 +66,18 @@ class SimulationEngine:
 
         # Instancia el contenedor del estado físico actual de la simulación
         self.state = SimulationState(
-             positions=positions,
-             velocities=velocities,
+            positions=positions,
+            velocities=velocities,
 
-             neutral_positions=neutral_positions,
-              neutral_velocities=neutral_velocities,
+            neutral_positions=neutral_positions,
+            neutral_velocities=neutral_velocities,
 
-             ion_positions=np.zeros((0, 3), dtype=float),
-             ion_velocities=np.zeros((0, 3), dtype=float),
+            ion_positions=np.zeros((0, 3), dtype=float),
+            ion_velocities=np.zeros((0, 3), dtype=float),
 
-             time=0.0,
-             stage=stage,
-)
+            time=0.0,
+            stage=stage,
+        )
 
 
     def step(self, dt: float):
