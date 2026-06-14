@@ -52,3 +52,6 @@ class SimulationState:
     ionization_events: int = 0
     neutral_positions: np.ndarray = field(default_factory=lambda: np.zeros((0, 3), dtype=float))
     neutral_velocities: np.ndarray = field(default_factory=lambda: np.zeros((0, 3), dtype=float))
+    # 👇 AGREGA ESTAS DOS LÍNEAS AL FINAL:
+    ion_positions: np.ndarray = field(default_factory=lambda: np.zeros((0, 3), dtype=float))
+    ion_velocities: np.ndarray = field(default_factory=lambda: np.zeros((0, 3), dtype=float))
