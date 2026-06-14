@@ -1,0 +1,6 @@
+{
+  "initial_particles": 200,
+  "gap_distance_m": 0.01,
+  "electric_field_v_per_m": 100000.0,
+  "gas_pressure_pa": 100.0
+}
