@@ -41,21 +41,41 @@ class Renderer3D:
 
         self._set_default_domain()
 
-    def update_particles(self, electron_positions, neutral_positions=None) -> None:
+    # MODIFICADO: Ahora acepta explícitamente los 4 argumentos posicionales
+    def update_particles(self, electron_positions, neutral_positions=None, ion_positions=None, recombined_positions=None) -> None:
         if not self.available:
             return
+
+        # 1. Electrones
         if electron_positions is None or len(electron_positions) == 0:
             electron_points = np.empty((0, 3))
         else:
             electron_points = np.asarray(electron_positions, dtype=float)
 
+        # 2. Neutras
         if neutral_positions is None or len(neutral_positions) == 0:
             neutral_points = np.empty((0, 3))
         else:
             neutral_points = np.asarray(neutral_positions, dtype=float)
 
+        # 3. Iones Positivos
+        if ion_positions is None or len(ion_positions) == 0:
+            ion_points = np.empty((0, 3))
+        else:
+            ion_points = np.asarray(ion_positions, dtype=float)
+
+        # 4. Recombinadas (Moradas)
+        if recombined_positions is None or len(recombined_positions) == 0:
+            recombined_points = np.empty((0, 3))
+        else:
+            recombined_points = np.asarray(recombined_positions, dtype=float)
+
+        # Reemplazar los 4 actores correspondientes
         self._replace_actor("electron", electron_points, "yellow")
         self._replace_actor("neutral", neutral_points, "dodgerblue")
+        self._replace_actor("ion", ion_points, "orangered")
+        self._replace_actor("recombined", recombined_points, "purple")
+
         if self._first_render:
             self._plotter.reset_camera()
             self._first_render = False
@@ -128,8 +148,16 @@ class Renderer3D:
             self._plotter.remove_actor(self._electron_actor)
         if self._neutral_actor is not None:
             self._plotter.remove_actor(self._neutral_actor)
+        if self._ion_actor is not None:          # <-- AGREGAR
+            self._plotter.remove_actor(self._ion_actor)
+        if self._recombined_actor is not None:   # <-- AGREGAR
+            self._plotter.remove_actor(self._recombined_actor)
+            
         self._electron_mesh = self._pv.PolyData(np.zeros((1, 3)))
         self._neutral_mesh = None
+        self._ion_mesh = None                     # <-- AGREGAR
+        self._recombined_mesh = None              # <-- AGREGAR
+        
         self._electron_actor = self._plotter.add_mesh(
             self._electron_mesh,
             render_points_as_spheres=True,
@@ -137,5 +165,7 @@ class Renderer3D:
             color="yellow",
         )
         self._neutral_actor = None
+        self._ion_actor = None                    # <-- AGREGAR
+        self._recombined_actor = None             # <-- AGREGAR
         self._first_render = True
         self._plotter.render()

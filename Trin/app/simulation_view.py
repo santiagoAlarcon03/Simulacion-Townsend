@@ -13,9 +13,14 @@ class SimulationView(QWidget):
         layout.addWidget(self.renderer.widget)
 
     
-    def update_particles(self, electron_positions, neutral_positions=None, ion_positions=None, *args) -> None:
-        # Aquí se los pasamos en orden al renderizador 3D que ya los sabe pintar:
-        self.renderer.update_particles(electron_positions, neutral_positions, ion_positions)
+    def update_particles(self, electron_positions, neutral_positions=None, ion_positions=None, recombined_positions=None) -> None:
+        # Enviamos las 4 listas limpias directamente al renderizador en este orden exacto
+        self.renderer.update_particles(
+            electron_positions, 
+            neutral_positions, 
+            ion_positions, 
+            recombined_positions
+        )
 
     def set_domain(self, xy_extent: float, gap_distance: float) -> None:
         self.renderer.set_domain(xy_extent, gap_distance)

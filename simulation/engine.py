@@ -578,3 +578,34 @@ class SimulationEngine:
                 
         # Caso de respaldo (Fallback): Colocación por defecto en el centro-superior si falla la búsqueda.
         return np.array([[0.0, 0.0, self.config.gap_distance * 0.9]], dtype=float)
+    
+    
+    def check_recombination(self):
+        # Lista para guardar los índices de las partículas que se van a recombinar
+        recombined_this_frame = 0
+        
+        # Recorremos electrones e iones buscando colisiones/cercanía
+        for e in self.electrons:
+            for ion in self.ions:
+                # Calculamos la distancia entre el electrón y el ion
+                dist = self.calculate_distance(e, ion)
+                
+                # Si están extremadamente cerca (radio de recombinación)
+                if dist < self.recombination_radius:
+                    # Marcamos el evento
+                    e.is_recombining = True
+                    ion.is_recombining = True
+                    
+                    # Registramos para el contador
+                    recombined_this_frame += 1
+                    
+                    # Los removemos de las listas activas de carga eléctrica
+                    self.electrons.remove(e)
+                    self.ions.remove(ion)
+                    
+                    # (Opcional) Creamos una partícula neutra en esa posición
+                    # self.neutrals.append(NeutralParticle(position=ion.position))
+                    break # Salimos del bucle interno para este electrón
+                    
+        # Actualizamos el estado global para que la interfaz lo lea
+        self.state.total_recombinations += recombined_this_frame

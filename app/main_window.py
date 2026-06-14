@@ -80,10 +80,16 @@ class MainWindow(QMainWindow):
         self.lbl_neutrals = QLabel("⚛️ Neutras:       0")
         self.lbl_neutrals.setFont(font_counters)
         self.lbl_neutrals.setStyleSheet("color: #1E90FF;") # Azul (dodgerblue)
+
+        # 🔮 NUEVO: Contador visual de eventos de desionización por recombinación
+        self.lbl_recombined = QLabel("🔮 Desionizados:  0")
+        self.lbl_recombined.setFont(font_counters)
+        self.lbl_recombined.setStyleSheet("color: #BA55D3;") # Morado orquídea medio
         
         counter_layout.addWidget(self.lbl_electrons)
         counter_layout.addWidget(self.lbl_ions)
         counter_layout.addWidget(self.lbl_neutrals)
+        counter_layout.addWidget(self.lbl_recombined) # 📥 Agregado al panel inferior
 
         # Bandera de control para pausar/reanudar los cálculos físicos
         self._running = False
@@ -128,19 +134,12 @@ class MainWindow(QMainWindow):
         self.view.set_domain(self.config.xy_extent, self.config.gap_distance)
 
     def start_simulation(self) -> None:
-        """Inicia de forma activa la ejecución física de la simulación.
-        
-        Extrae los parámetros configurados por el usuario en el panel frontal,
-        reinicia los buffers del motor y del logger, y activa el procesamiento dinámico.
-        """
+        """Inicia de forma activa la ejecución física de la simulación."""
         stage = self.controls.selected_stage()
         count = self.controls.particle_count()
-        # ⚛️ NUEVO: Extraemos la cantidad de neutras elegida en el spinbox
         neutral_count = self.controls.neutral_particle_count()
         
-        # 🔄 Pasamos el tercer argumento al motor físico
         self.engine.reset(stage, count, neutral_count)
-        
         self.logger.reset()
         self._running = True
         self.controls.set_pause_state(False)
@@ -150,29 +149,24 @@ class MainWindow(QMainWindow):
         self._running = not paused
 
     def reset_simulation(self) -> None:
-        """Detiene la simulación y restablece todas las variables a sus condiciones iniciales.
-        
-        Limpia los gráficos, lee los controles de configuración actuales e inyecta 
-        las partículas semilla en el motor visualizaciones para preparar un nuevo ciclo.
-        """
+        """Detiene la simulación y restablece todas las variables a sus condiciones iniciales."""
         stage = self.controls.selected_stage()
         count = self.controls.particle_count()
-        # ⚛️ NUEVO: Extraemos la cantidad de neutras aquí también
         neutral_count = self.controls.neutral_particle_count()
         
-        # 🔄 Pasamos el tercer argumento al motor físico
         self.engine.reset(stage, count, neutral_count)
-        
         self.logger.reset()
         self._running = False
         self.controls.set_pause_state(True)
         
         # Sincroniza la UI inmediatamente con el estado vacío o inicializado
         if self.engine.state is not None:
+            recombined_pos = getattr(self.engine.state, 'recombined_positions', None)
             self.view.update_particles(
-                self.engine.state.positions, 
-                self.engine.state.neutral_positions, 
-                self.engine.state.ion_positions
+                self.engine.state.positions,            # 1. Electrones
+                self.engine.state.neutral_positions,    # 2. Neutras
+                self.engine.state.ion_positions,        # 3. Iones
+                recombined_pos                          # 4. Recombinadas
             )
             self.controls.set_stage_readback(self.engine.state.stage)
             
@@ -185,6 +179,7 @@ class MainWindow(QMainWindow):
         self.lbl_electrons.setText("⚡ Electrones:    0")
         self.lbl_ions.setText("➕ Iones (+):     0")
         self.lbl_neutrals.setText("⚛️ Neutras:       0")
+        self.lbl_recombined.setText("🔮 Desionizados:  0") # NUEVO: Reseteo del texto morado
 
     def on_tick(self) -> None:
         """Subrutina cíclica principal activada por el QTimer (Game Loop de la UI)."""
@@ -196,7 +191,7 @@ class MainWindow(QMainWindow):
         if state is None or metrics is None:
             return
             
-        # Almacena en el histórico (incluyendo conteo de iones)
+        # Almacena en el histórico
         self.logger.log(
             state.time, 
             metrics["count"], 
@@ -204,31 +199,42 @@ class MainWindow(QMainWindow):
             metrics.get("ion_count", 0),
         )
         
-        # Actualiza la posición de todas las especies de partículas en la escena 3D
-        self.view.update_particles(state.positions, state.neutral_positions, state.ion_positions)
-        # Actualiza el indicador de texto que muestra la etapa física deducida
+        # 🔄 MODIFICADO: Extraer las posiciones de destello morado
+        recombined_pos = getattr(state, 'recombined_positions', None)
+        
+        # Actualiza la posición de todas las especies en la escena 3D (incluyendo moradas)
+        self.view.update_particles(
+            state.positions, 
+            state.neutral_positions, 
+            state.ion_positions, 
+            recombined_pos
+        )
+        
         self.controls.set_stage_readback(state.stage)
-        # Refresca las curvas del osciloscopio gráfico en tiempo real
         self.plot_panel.update_plot(self.logger.times, self.logger.counts, self.logger.ion_counts)
 
         # 🔄 REFRESCAR LOS CONTADORES EN LA TARJETA IZQUIERDA
         e_count = metrics.get("count", 0)
         i_count = metrics.get("ion_count", 0)
         n_count = len(state.neutral_positions) if state.neutral_positions is not None else 0
+        r_count = metrics.get("recombined_count", 0) # NUEVO: Métrica de recombinados
         
         # Formateamos con espaciados fijos para que los números no muevan las etiquetas desordenadamente
         self.lbl_electrons.setText(f"⚡ Electrones:    {e_count:<5}")
         self.lbl_ions.setText(f"➕ Iones (+):     {i_count:<5}")
         self.lbl_neutrals.setText(f"⚛️ Neutras:       {n_count:<5}")
+        self.lbl_recombined.setText(f"🔮 Desionizados:  {r_count:<5}") # NUEVO: Inyección de datos morados
 
     def add_electron(self) -> None:
         """Inyecta manualmente un único electrón libre en el sistema."""
         self.engine.add_electron()
         if self.engine.state is not None:
+            recombined_pos = getattr(self.engine.state, 'recombined_positions', None)
             self.view.update_particles(
                 self.engine.state.positions, 
                 self.engine.state.neutral_positions, 
-                self.engine.state.ion_positions
+                self.engine.state.ion_positions,
+                recombined_pos
             )
             self.controls.set_stage_readback(self.engine.state.stage)
             self.plot_panel.update_plot(
@@ -241,10 +247,12 @@ class MainWindow(QMainWindow):
         """Inyecta manualmente una partícula del gas neutro de fondo en el sistema."""
         self.engine.add_neutral()
         if self.engine.state is not None:
+            recombined_pos = getattr(self.engine.state, 'recombined_positions', None)
             self.view.update_particles(
                 self.engine.state.positions, 
                 self.engine.state.neutral_positions,
-                self.engine.state.ion_positions
+                self.engine.state.ion_positions,
+                recombined_pos
             )
             self.controls.set_stage_readback(self.engine.state.stage)
             self.plot_panel.update_plot(
