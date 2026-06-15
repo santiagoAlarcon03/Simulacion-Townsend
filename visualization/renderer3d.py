@@ -81,8 +81,8 @@ class Renderer3D:
         self._plotter.view_isometric()
         self._set_default_domain()
 
-    # 🔄 MODIFICADO CON *args: Elástica y blindada contra errores posicionales
-    def update_particles(self, electron_positions, neutral_positions=None, *args) -> None:
+    # 🎯 CORRECCIÓN TOTAL: Eliminamos *args y declaramos las 4 especies fijas
+    def update_particles(self, electron_positions, neutral_positions=None, ion_positions=None, recombined_positions=None) -> None:
         if not self.available:
             return
 
@@ -98,17 +98,18 @@ class Renderer3D:
         else:
             neutral_points = np.asarray(neutral_positions, dtype=float)
 
-        # 3. Iones Positivos (Naranja/Rojo) -> Primer argumento extra en args
-        ion_points = np.empty((0, 3))
-        if len(args) > 0 and args[0] is not None:
-            if len(args[0]) > 0:
-                ion_points = np.asarray(args[0], dtype=float)
+        # 3. Iones Positivos (Naranja/Rojo)
+        if ion_positions is None or len(ion_positions) == 0:
+            ion_points = np.empty((0, 3))
+        else:
+            # 💥 Al usar asarray directo evitamos problemas de referencias circulares in-place
+            ion_points = np.asarray(ion_positions, dtype=float)
 
-        # 4. Recombinadas (Morado) -> Segundo argumento extra en args
-        recombined_points = np.empty((0, 3))
-        if len(args) > 1 and args[1] is not None:
-            if len(args[1]) > 0:
-                recombined_points = np.asarray(args[1], dtype=float)
+        # 4. Recombinadas (Morado)
+        if recombined_positions is None or len(recombined_positions) == 0:
+            recombined_points = np.empty((0, 3))
+        else:
+            recombined_points = np.asarray(recombined_positions, dtype=float)
 
         # Renderizar de forma segura las 4 especies usando el reemplazo dinámico
         self._replace_actor("electron", electron_points, "yellow", 12)
@@ -124,29 +125,53 @@ class Renderer3D:
 
     def _replace_actor(self, kind: str, points: np.ndarray, color: str, size: int) -> None:
         """Remueve de forma eficiente el actor gráfico anterior y dibuja uno nuevo."""
+        if not self.available:
+            return
+
+        # 🛡️ FILTRO DE SEGURIDAD: Si por error llega "ions" con 's', lo forzamos a "ion"
+        if kind == "ions":
+            kind = "ion"
+
         actor_attr = f"_{kind}_actor"
         mesh_attr = f"_{kind}_mesh"
+        
+        # Verificación preventiva: si el atributo no existe en el __init__, detenemos el flujo
+        if not hasattr(self, actor_attr):
+            print(f"⚠️ Error en Renderer3D: El atributo {actor_attr} no existe en la clase.")
+            return
+
         actor = getattr(self, actor_attr)
         
+        # 1. REMOCIÓN DEL ACTOR CADUCO: Limpiamos el búfer viejo de la escena de PyVista
         if actor is not None:
-            self._plotter.remove_actor(actor)
+            try:
+                self._plotter.remove_actor(actor)
+            except Exception:
+                pass # Evita caídas si el actor ya fue eliminado de forma externa
             
-        if points.size == 0:
+        # 2. ESCENARIO VACÍO: Si no hay partículas en este frame, limpiamos las referencias
+        if points is None or points.size == 0 or len(points) == 0:
             setattr(self, mesh_attr, None)
             setattr(self, actor_attr, None)
             return
             
+        # 3. RENDERIZADO REGENERATIVO: Construimos la PolyData con los nuevos datos reducidos
         mesh = self._pv.PolyData(points)
-        actor = self._plotter.add_mesh(
+        
+        # Inyectamos la geometría fresca en el motor de renderizado
+        new_actor = self._plotter.add_mesh(
             mesh,
             render_points_as_spheres=True,
             point_size=size,
             color=color,
-            opacity=0.35 if kind == "neutral" else 1.0
+            opacity=0.35 if kind == "neutral" else 1.0,
+            ambient=0.5 if kind == "ion" else 0.0,  # Mantenemos las propiedades de tus iones
+            diffuse=0.8 if kind == "ion" else 1.0
         )
         
+        # Guardamos de manera segura las nuevas referencias en los slots de la clase
         setattr(self, mesh_attr, mesh)
-        setattr(self, actor_attr, actor)
+        setattr(self, actor_attr, new_actor)
 
     def set_domain(self, xy_extent: float, gap_distance: float) -> None:
         if not self.available:
@@ -202,156 +227,258 @@ class Renderer3D:
 class TownsendSimulation:
     """Motor de cálculo físico microscópico para descargas de tipo Townsend."""
 
-    def __init__(self, xy_extent=0.005, gap_distance=0.01, num_neutrals=150):
+    def __init__(self, xy_extent=0.005, gap_distance=0.01, num_neutrals=250):
         self.xy_extent = xy_extent
         self.gap_distance = gap_distance
         
-        # Campo eléctrico uniforme orientado en el eje vertical Z (V/m)
-        self.E_field = np.array([0.0, 0.0, 5e5]) 
-        self.dt = 1e-11  
+        # ⚡ VALORES CALIBRADOS: Campo eléctrico aumentado para asegurar ionización
+        self.E_field = np.array([0.0, 0.0, 1.2e6]) 
+        self.dt = 4e-11  # Paso de tiempo optimizado para visualización
         
         self.e_charge = 1.602e-19                    
         self.e_mass = 9.109e-31                      
-        self.ion_mass = 6.633e-26  # Masa de un ion de Argón (aprox 73000 veces más pesado)
-        self.collision_radius = 0.0003                
+        self.ion_mass = 6.633e-26  # Masa de un ion de Argón
+        
+        # 🎯 RADIO DE COLISIÓN OPTIMIZADO: Facilita que los electrones toquen los átomos
+        self.collision_radius = 0.0006                
         self.ionization_energy = 15.6 * self.e_charge 
+
+        # 🌟 Parámetros de auto-sostenibilidad y fases
+        self.gamma = 0.06  # 6% de probabilidad de emisión secundaria en el cátodo
+        self.current_phase = "Descarga No Sostenida (Avalanchas aisladas)"
 
         # Distribución del gas neutro inicial
         self.neutral_pos = (np.random.rand(num_neutrals, 3) - 0.5) * 2 * xy_extent
         self.neutral_pos[:, 2] = np.random.rand(num_neutrals) * gap_distance 
 
-        # Configuración de Electrones
-        self.electron_pos = np.array([[0.0, 0.0, 0.0005]])
-        self.electron_vel = np.array([[0.0, 0.0, 1e4]])
+        # Configuración de Electrones Semilla (Inyectamos 2 para garantizar flujo visual inicial)
+        self.electron_pos = np.array([[0.0, 0.0, 0.0005], [0.0005, -0.0005, 0.0005]])
+        self.electron_vel = np.array([[0.0, 0.0, 1e4], [0.0, 0.0, 1e4]])
 
-        # ➕ NUEVO: Vectores dinámicos para almacenar Iones positivos creados
+        # Vectores dinámicos
         self.ion_pos = np.empty((0, 3))
         self.ion_vel = np.empty((0, 3))
-
-        # 🔮 NUEVO: Almacenamiento de puntos efímeros de desionización/recombinación
         self.recombined_pos = np.empty((0, 3))
 
     def step(self):
-        """Calcula el siguiente paso temporal integrando fuerzas de electrones e iones."""
+        """Calcula el siguiente paso temporal integrando fuerzas con escalas visibles."""
         
-        # --- A. CINEMÁTICA DE LOS IONES POSITIVOS ---
-        # Los iones se mueven en sentido OPUESTO al campo eléctrico (hacia el cátodo Z=0)
+        # --- A. CINEMÁTICA DE LOS IONES ACELERADA VISUALMENTE ---
         if len(self.ion_pos) > 0:
+            # Multiplicamos la aceleración del ion por un factor artificial (ej. 500) 
+            # para compensar su enorme masa (73,000x) y que puedas verlos bajar en tiempo real
             ion_acceleration = (self.e_charge * self.E_field) / self.ion_mass
-            self.ion_vel -= ion_acceleration * self.dt  # Signo menos porque van al cátodo
+            self.ion_vel -= ion_acceleration * self.dt * 500.0  # <- FACTOR VISUAL
             self.ion_pos += self.ion_vel * self.dt
             
-            # Condición de frontera para Iones: Absorción en el Cátodo (Z <= 0)
+            # Detectar impactos en el cátodo inferior (Z <= 0)
+            iones_en_catodo = self.ion_pos[:, 2] <= 0
+            num_impactos = np.sum(iones_en_catodo)
+            
+            if num_impactos > 0 and self.gamma > 0:
+                electrones_secundarios = []
+                vel_secundarias = []
+                for _ in range(num_impactos):
+                    if np.random.rand() < self.gamma:
+                        electrones_secundarios.append([0.0, 0.0, 0.0002])
+                        vel_secundarias.append([0.0, 0.0, 1e4])
+                
+                if len(electrones_secundarios) > 0:
+                    if len(self.electron_pos) == 0:
+                        self.electron_pos = np.array(electrones_secundarios)
+                        self.electron_vel = np.array(vel_secundarias)
+                    else:
+                        self.electron_pos = np.vstack([self.electron_pos, electrones_secundarios])
+                        self.electron_vel = np.vstack([self.electron_vel, vel_secundarias])
+
+            # Absorción estricta de iones
             ion_fuera = (self.ion_pos[:, 2] <= 0) | (self.ion_pos[:, 2] > self.gap_distance)
             self.ion_pos = self.ion_pos[~ion_fuera]
             self.ion_vel = self.ion_vel[~ion_fuera]
 
-        # Al iniciar cada ciclo limpiamos el "destello" morado anterior para que sea dinámico
+        # Reseteo dinámico de desionizaciones por frame
         self.recombined_pos = np.empty((0, 3))
 
-        if len(self.electron_pos) == 0:
-            return
-
-        # --- B. CINEMÁTICA DE LOS ELECTRONES ---
-        acceleration = (self.e_charge * self.E_field) / self.e_mass
-        self.electron_vel += acceleration * self.dt
-        self.electron_pos += self.electron_vel * self.dt
-
-        nuevos_electrones = []
+        nuevos_electrones_pos = []
+        nuevos_electrones_vel = []
+        nuevos_iones_pos = []
         electrones_a_eliminar = []
-        nuevos_iones = []
 
-        # --- C. DETECCIÓN DE IMPACTOS DE MONTE CARLO ---
-        for i, e_pos in enumerate(self.electron_pos):
-            if len(self.neutral_pos) == 0:
-                continue
-                
-            distancias = np.linalg.norm(self.neutral_pos - e_pos, axis=1)
-            choques = np.where(distancias < self.collision_radius)[0]
+        # --- B. CINEMÁTICA Y COLISIONES DE ELECTRONES ---
+        if len(self.electron_pos) > 0:
+            # Filtro drástico inicial: Eliminar CUALQUIER electrón que ya esté en el techo o fuera de los límites
+            # Esto evita que se queden atascados arriba como se ve en tu imagen
+            en_techo = (self.electron_pos[:, 2] >= self.gap_distance * 0.98) | (self.electron_pos[:, 2] < 0)
+            # También limpiamos los límites laterales del cubo (X e Y)
+            fuera_lados = (np.abs(self.electron_pos[:, 0]) > self.xy_extent) | (np.abs(self.electron_pos[:, 1]) > self.xy_extent)
+            
+            eliminados_frontera = en_techo | fuera_lados
+            self.electron_pos = self.electron_pos[~eliminados_frontera]
+            self.electron_vel = self.electron_vel[~eliminados_frontera]
 
-            if len(choques) > 0:
-                idx_impacto = choques[0] # Tomamos el primer átomo chocado
-                v_mag = np.linalg.norm(self.electron_vel[i])
-                kinetic_energy = 0.5 * self.e_mass * (v_mag**2)
+        # Si tras la limpieza quedan electrones, procesamos su movimiento y colisiones
+        if len(self.electron_pos) > 0:
+            acceleration = (self.e_charge * self.E_field) / self.e_mass
+            self.electron_vel += acceleration * self.dt
+            self.electron_pos += self.electron_vel * self.dt
 
-                if kinetic_energy > self.ionization_energy:
-                    # ➕ FÍSICA DE IONIZACIÓN DE TOWNSEND:
-                    # 1. El electrón arranca otro electrón. Nacen dos electrones.
-                    for _ in range(2):
+            for i, e_pos in enumerate(self.electron_pos):
+                if len(self.neutral_pos) == 0:
+                    continue
+                    
+                distancias = np.linalg.norm(self.neutral_pos - e_pos, axis=1)
+                choques = np.where(distancias < self.collision_radius)[0]
+
+                if len(choques) > 0:
+                    idx_impacto = choques[0]
+                    
+                    # 🎯 FORZADO DE DESIONIZACIÓN VISUAL: 
+                    # Cada colisión efectiva tiene alta probabilidad de ionizar y pintar morado
+                    if np.random.rand() < 0.50:
+                        for _ in range(2):
+                            v_random = np.random.normal(0, 1, 3)
+                            v_random /= np.linalg.norm(v_random)
+                            nuevos_electrones_pos.append(e_pos.copy())
+                            nuevos_electrones_vel.append(v_random * 1e5)
+                        
+                        electrones_a_eliminar.append(i)
+
+                        # Crear Ion positivo (Esfera roja)
+                        nuevos_iones_pos.append(self.neutral_pos[idx_impacto].copy())
+                        
+                        # Registrar punto morado efímero de desionización
+                        self.recombined_pos = np.vstack([self.recombined_pos, self.neutral_pos[idx_impacto]])
+                    else:
+                        # Rebote elástico ordinario
                         v_random = np.random.normal(0, 1, 3)
-                        v_random /= np.linalg.norm(v_random)
-                        v_val = np.sqrt(2 * (kinetic_energy - self.ionization_energy) / (2 * self.e_mass))
-                        nuevos_electrones.append(v_random * v_val)
-                    
-                    electrones_a_eliminar.append(i)
+                        self.electron_vel[i] = (v_random / np.linalg.norm(v_random)) * np.linalg.norm(self.electron_vel[i])
 
-                    # 2. El átomo neutro impactado se convierte en un Ion Positivo en ese punto exacto
-                    nuevos_iones.append(self.neutral_pos[idx_impacto].copy())
-                    
-                    # 3. 🔮 FÍSICA DE DESIONIZACIÓN/RECOMBINACIÓN:
-                    # Registramos el evento visual morado justo en el punto de la colisión ionizante
-                    self.recombined_pos = np.vstack([self.recombined_pos, self.neutral_pos[idx_impacto]])
+            # Aplicar cambios en arreglos
+            if len(electrones_a_eliminar) > 0:
+                self.electron_pos = np.delete(self.electron_pos, electrones_a_eliminar, axis=0)
+                self.electron_vel = np.delete(self.electron_vel, electrones_a_eliminar, axis=0)
 
+            if len(nuevos_electrones_pos) > 0:
+                if len(self.electron_pos) == 0:
+                    self.electron_pos = np.array(nuevos_electrones_pos)
+                    self.electron_vel = np.array(nuevos_electrones_vel)
                 else:
-                    # COLISIÓN ELÁSTICA: Dispersión angular simple
-                    v_random = np.random.normal(0, 1, 3)
-                    self.electron_vel[i] = (v_random / np.linalg.norm(v_random)) * v_mag
+                    self.electron_pos = np.vstack([self.electron_pos, nuevos_electrones_pos])
+                    self.electron_vel = np.vstack([self.electron_vel, nuevos_electrones_vel])
 
-        # Actualizar arreglos de electrones
-        if len(electrones_a_eliminar) > 0:
-            self.electron_pos = np.delete(self.electron_pos, electrones_a_eliminar, axis=0)
-            self.electron_vel = np.delete(self.electron_vel, electrones_a_eliminar, axis=0)
+            if len(nuevos_iones_pos) > 0:
+                if len(self.ion_pos) == 0:
+                    self.ion_pos = np.array(nuevos_iones_pos)
+                    self.ion_vel = np.zeros((len(nuevos_iones_pos), 3))
+                else:
+                    self.ion_pos = np.vstack([self.ion_pos, nuevos_iones_pos])
+                    self.ion_vel = np.vstack([self.ion_vel, np.zeros((len(nuevos_iones_pos), 3))])
 
-        if len(nuevos_electrones) > 0:
-            puntos_impacto = np.repeat([e_pos], len(nuevos_electrones), axis=0)
-            self.electron_pos = np.vstack([self.electron_pos, puntos_impacto])
-            self.electron_vel = np.vstack([self.electron_vel, nuevos_electrones])
+        # --- C. CONTROL DE FASES PARA TU BANNER ---
+        total_activos = len(self.electron_pos) + len(self.ion_pos)
+        num_recombinados = len(self.recombined_pos)
 
-        # Agregar los nuevos iones a la física activa
-        if len(nuevos_iones) > 0:
-            self.ion_pos = np.vstack([self.ion_pos, nuevos_iones])
-            # Los iones nacen prácticamente en reposo térmico (velocidad muy baja)
-            self.ion_vel = np.vstack([self.ion_vel, np.zeros((len(nuevos_iones), 3))])
+        if total_activos == 0:
+            self.current_phase = "Descarga Extinguida (Sin ionización suficiente)"
+        elif num_recombinados > 0 and len(self.electron_pos) == 0:
+            self.current_phase = "Fase Townsend: Desionización Activa (Recombinación)"
+        elif len(self.electron_pos) == 0 and len(self.ion_pos) > 0:
+            self.current_phase = "Fase Townsend: Deriva de Iones en Retorno"
+        elif total_activos > 0 and total_activos < 50:
+            self.current_phase = "Fase Townsend: Avalanchas Primarias Obscuras"
+        else:
+            self.current_phase = "⚡ DESCARGA AUTO-SOSTENIDA (Ruptura Townsend) ⚡"
 
-        # Absorción de electrones en ánodo/cátodo
-        fuera_rango = (self.electron_pos[:, 2] > self.gap_distance) | (self.electron_pos[:, 2] < 0)
-        self.electron_pos = self.electron_pos[~fuera_rango]
-        self.electron_vel = self.electron_vel[~fuera_rango]
 
 
 # ==========================================
-# CÓDIGO DE EJECUCIÓN (Integración con PyQt6)
+# CÓDIGO DE EJECUCIÓN (Integración Calibrada con PyQt6)
 # ==========================================
 if __name__ == "__main__":
     import sys
-    from PyQt6.QtWidgets import QApplication, QMainWindow
+    from PyQt6.QtWidgets import QApplication, QMainWindow, QVBoxLayout, QWidget, QLabel
     from PyQt6.QtCore import QTimer
+    from PyQt6.QtGui import QFont
 
     app = QApplication(sys.argv)
     window = QMainWindow()
     window.setWindowTitle("Simulación de Avalancha Townsend Completa 3D")
     window.resize(800, 600)
 
+    # 🌟 Contenedor principal y layout vertical para Banner + 3D
+    main_widget = QWidget()
+    layout = QVBoxLayout(main_widget)
+    layout.setContentsMargins(5, 5, 5, 5)
+
+    # 🏷️ Banner visual de las fases con telemetría de partículas integrada
+    lbl_fase = QLabel("Fase Townsend: Inicializando...")
+    lbl_fase.setFont(QFont("Segoe UI", 11, QFont.Weight.Bold))
+    lbl_fase.setStyleSheet("""
+        QLabel {
+            background-color: #1a1a24;
+            color: #00ffcc;
+            border: 2px solid #333344;
+            border-radius: 5px;
+            padding: 8px;
+            qproperty-alignment: 'AlignCenter';
+        }
+    """)
+    layout.addWidget(lbl_fase)
+
     renderer = Renderer3D(window)
     sim = TownsendSimulation()
     
-    window.setCentralWidget(renderer.widget)
+    # Añadir el widget del renderizador al layout inferior
+    layout.addWidget(renderer.widget, stretch=1)
+    window.setCentralWidget(main_widget)
+    
     renderer.set_domain(sim.xy_extent, sim.gap_distance)
 
     # Game Loop de renderizado acoplado
     def timer_event():
+        # 1. Avanzar la física del plasma
         sim.step()
         
-        # 🔄 Pasamos los electrones, las neutras, los iones y las partículas recombinadas en orden
-        renderer.update_particles(
-            sim.electron_pos, 
-            sim.neutral_pos, 
-            sim.ion_pos, 
-            sim.recombined_pos
-        )
+        # Extracción segura de arreglos para evitar desfases de memoria con PyVista
+        e_pos = sim.electron_pos if len(sim.electron_pos) > 0 else np.empty((0, 3))
+        n_pos = sim.neutral_pos if len(sim.neutral_pos) > 0 else np.empty((0, 3))
+        i_pos = sim.ion_pos if len(sim.ion_pos) > 0 else np.empty((0, 3))
+        r_pos = sim.recombined_pos if len(sim.recombined_pos) > 0 else np.empty((0, 3))
         
-        # Reinyección si la avalancha se extingue por completo
-        if len(sim.electron_pos) == 0:
+        # 2. 🔄 Pasamos todas las especies activas al renderizador
+        renderer.update_particles(e_pos, n_pos, i_pos, r_pos)
+        
+        # 3. 🔄 ACTUALIZACIÓN CON TELEMETRÍA: Monitoreamos los contadores en tiempo real
+        lbl_fase.setText(f"{sim.current_phase}  |  [ e⁻: {len(e_pos)}  •  Iones+: {len(i_pos)} ]")
+        
+        # 4. 🔄 CONTROL ESTÍTICO ROBUSTO DEL BANNER
+        if "AUTO-SOSTENIDA" in sim.current_phase:
+            lbl_fase.setStyleSheet("""
+                background-color: #2b0040; color: #ff00ff; border: 2px solid #ff00ff; 
+                border-radius: 5px; padding: 8px; qproperty-alignment: 'AlignCenter';
+            """)
+        elif "Desionización" in sim.current_phase or "Deriva" in sim.current_phase:
+            # Color azul índigo/eléctrico para la fase donde los electrones ya se fueron y quedan los iones
+            lbl_fase.setStyleSheet("""
+                background-color: #0f0f2d; color: #7f7fff; border: 2px solid #4f4fff; 
+                border-radius: 5px; padding: 8px; qproperty-alignment: 'AlignCenter';
+            """)
+        elif "Extinguida" in sim.current_phase:
+            lbl_fase.setStyleSheet("""
+                background-color: #2b1111; color: #ff5555; border: 2px solid #ff5555; 
+                border-radius: 5px; padding: 8px; qproperty-alignment: 'AlignCenter';
+            """)
+        else:
+            # Estado base (Cian) para avalanchas oscuras activas
+            lbl_fase.setStyleSheet("""
+                background-color: #1a1a24; color: #00ffcc; border: 2px solid #333344; 
+                border-radius: 5px; padding: 8px; qproperty-alignment: 'AlignCenter';
+            """)
+
+        # 🔒 REINYECCIÓN ANTICORRUPCIÓN:
+        # Solo se permite un nuevo disparo semilla si el gas se desionizó por completo 
+        # y no queda absolutamente ningún portador de carga libre flotando.
+        if len(sim.electron_pos) == 0 and len(sim.ion_pos) == 0:
             sim.electron_pos = np.array([[0.0, 0.0, 0.0005]])
             sim.electron_vel = np.array([[0.0, 0.0, 1e4]])
 

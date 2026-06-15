@@ -10,12 +10,11 @@ class SimulationView(QWidget):
         layout.setContentsMargins(0, 0, 0, 0)
         layout.addWidget(self.renderer.widget)
 
-    # 🔄 Recibe electrones, neutras, iones y usa *args para atrapar las posiciones recombinadas (moradas)
-    def update_particles(self, electron_positions, neutral_positions=None, ion_positions=None, *args) -> None:
-        # Extraemos las posiciones recombinadas si vienen en los argumentos extra (*args)
-        recombined_positions = args[0] if len(args) > 0 else None
+    # 🎯 SOLUCIÓN VISUAL: Declaramos explícitamente todos los parámetros en su orden real
+    def update_particles(self, electron_positions, neutral_positions=None, ion_positions=None, recombined_positions=None) -> None:
+        """Envía las matrices de coordenadas directamente al renderizador 3D en orden estricto."""
         
-        # Se lo pasamos TODO al renderizador en orden
+        # Ahora el flujo de datos es directo, transparente y libre de errores de indexación
         self.renderer.update_particles(
             electron_positions, 
             neutral_positions, 

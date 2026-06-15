@@ -116,71 +116,54 @@ def initialize_neutral_particles(count, config, rng):
 def random_thermal_velocities(
     count,
     rng,
-    temperature=300.0
+    temperature=300.0,
+    mass=None  # 💡 Agregamos masa parametrizable
 ):
     """
     Genera velocidades térmicas usando la distribución
-    de Maxwell-Boltzmann.
-
-    Retorna
-    -------
-    ndarray
-        Velocidades Nx3.
+    de Maxwell-Boltzmann adecuada para la masa de la partícula.
     """
+    if mass is None:
+        mass = constants.ELECTRON_MASS
 
     thermal_speed = math.sqrt(
         constants.BOLTZMANN
         * temperature
-        / constants.ELECTRON_MASS
+        / mass
     )
 
+    return rng.normal(
+        0.0,
+        *thermal_speed,  # Nota: si usas la escala normal, pasa thermal_speed directamente
+        size=(count, 3)
+    )
+
+
+def random_thermal_velocities(
+    count,
+    rng,
+    temperature=300.0,
+    mass=None
+):
+    """
+    Genera velocidades térmicas usando la distribución
+    de Maxwell-Boltzmann adecuada para la masa de la partícula.
+    """
+    if mass is None:
+        mass = constants.ELECTRON_MASS
+
+    thermal_speed = math.sqrt(
+        constants.BOLTZMANN
+        * temperature
+        / mass
+    )
+
+    # 🎯 CORRECCIÓN: Quitamos el asterisco (*) antes de thermal_speed
     return rng.normal(
         0.0,
         thermal_speed,
         size=(count, 3)
     )
-
-
-def random_directional_velocities(
-    count,
-    rng,
-    temperature=300.0
-):
-    """
-    Genera velocidades con dirección aleatoria
-    y magnitud térmica.
-
-    Las direcciones se distribuyen uniformemente
-    sobre una esfera.
-    """
-
-    if count == 0:
-        return np.zeros((0, 3), dtype=float)
-
-    thermal_speed = math.sqrt(
-        constants.BOLTZMANN
-        * temperature
-        / constants.ELECTRON_MASS
-    )
-
-    dirs = rng.normal(
-        size=(count, 3)
-    )
-
-    norms = np.linalg.norm(
-        dirs,
-        axis=1
-    )
-
-    norms = np.where(
-        norms == 0.0,
-        1.0,
-        norms
-    )
-
-    unit_dirs = dirs / norms[:, None]
-
-    return unit_dirs * thermal_speed
 
 
 def acceleration_from_field(
@@ -206,37 +189,23 @@ def acceleration_from_field(
     )
 
 
-def kinetic_energy_ev(
-    velocities
-):
+def kinetic_energy_ev(velocities, mass=None):  # 💡 Agregamos masa parametrizable
     """
-    Calcula energía cinética
-    expresada en electronvoltios (eV).
-
-    Retorna
-    -------
-    ndarray
-        Energías individuales.
+    Calcula energía cinética expresada en electronvoltios (eV) 
+    soportando la masa real de la partícula evaluada.
     """
-
     if velocities.size == 0:
         return np.zeros((0,), dtype=float)
 
-    speed_sq = np.sum(
-        velocities * velocities,
-        axis=1
-    )
+    if mass is None:
+        mass = constants.ELECTRON_MASS
 
-    energy_j = (
-        0.5
-        * constants.ELECTRON_MASS
-        * speed_sq
-    )
+    speed_sq = np.sum(velocities * velocities, axis=1)
 
-    return (
-        energy_j
-        / abs(constants.ELECTRON_CHARGE)
-    )
+    # Multiplica por la masa correcta (Electrón o Ion N2+)
+    energy_j = 0.5 * mass * speed_sq
+
+    return energy_j / abs(constants.ELECTRON_CHARGE)
 
 
 def estimate_current(
@@ -267,3 +236,48 @@ def estimate_current(
         )
         / area
     )
+
+def random_directional_velocities(
+    count,
+    rng,
+    temperature=300.0,
+    mass=None
+):
+    """
+    Genera velocidades con dirección aleatoria
+    y magnitud térmica.
+
+    Las direcciones se distribuyen uniformemente
+    sobre una esfera.
+    """
+
+    if count == 0:
+        return np.zeros((0, 3), dtype=float)
+
+    if mass is None:
+        mass = constants.ELECTRON_MASS
+
+    thermal_speed = math.sqrt(
+        constants.BOLTZMANN
+        * temperature
+        / mass
+    )
+
+    dirs = rng.normal(
+        size=(count, 3)
+    )
+
+    norms = np.linalg.norm(
+        dirs,
+        axis=1
+    )
+
+    norms = np.where(
+        norms == 0.0,
+        1.0,
+        norms
+    )
+
+    unit_dirs = dirs / norms[:, None]
+
+    return unit_dirs * thermal_speed
