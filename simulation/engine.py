@@ -103,10 +103,43 @@ class SimulationEngine:
                 state.positions = state.positions[keep]
                 state.velocities = state.velocities[keep]
 
-        # Cátodo (Z = 0): absorbe iones positivos
+        # Cátodo (Z = 0): absorbe iones positivos e implementa AUTOSOSTENIBILIDAD (Emisión Secundaria Gamma)
         if state.ion_positions.shape[0] > 0:
             absorbed_i = state.ion_positions[:, 2] <= 0.0
             if absorbed_i.any():
+                # 🔮 DETECCIÓN DE EMISIÓN SECUNDARIA (GAMMA TOWNSEND)
+                num_impacts = int(absorbed_i.sum())
+                gamma = getattr(self.config, 'secondary_emission_coeff', getattr(self.config, 'gamma', 0.05))
+                
+                # Evaluamos de forma estocástica qué impactos iónicos arrancan un electrón
+                secundarios_mask = self.rng.uniform(0.0, 1.0, size=num_impacts) < gamma
+                num_secondary_electrons = int(secundarios_mask.sum())
+
+                if num_secondary_electrons > 0:
+                    current_dtype = state.positions.dtype
+                    # Los electrones secundarios nacen exactamente en la superficie del Cátodo (Z = 1.0e-6)
+                    # Copiamos las posiciones X e Y de los iones que impactaron para máxima fidelidad física
+                    puntos_impacto_iones = state.ion_positions[absorbed_i][secundarios_mask]
+                    new_e_positions = puntos_impacto_iones.copy().astype(current_dtype)
+                    new_e_positions[:, 2] = 1.0e-6  # Justo arriba del Cátodo
+                    
+                    # Se inyectan con una velocidad térmica inicial hacia arriba (+Z)
+                    new_e_velocities = particles.random_thermal_velocities(
+                        num_secondary_electrons, self.rng, self.config.gas_temperature
+                    ).astype(current_dtype)
+                    new_e_velocities[:, 2] = np.abs(new_e_velocities[:, 2])  # Forzar vector hacia el Ánodo
+                    
+                    # Unimos los nuevos electrones secundarios de retroalimentación al estado global
+                    if state.positions.size == 0:
+                        state.positions = new_e_positions
+                        state.velocities = new_e_velocities
+                    else:
+                        state.positions = np.vstack([state.positions, new_e_positions])
+                        state.velocities = np.vstack([state.velocities, new_e_velocities])
+                    
+                    print(f"⚡ [AUTOSOSTENIBILIDAD] ¡Bombardeo en Cátodo! {num_impacts} iones generaron {num_secondary_electrons} electrones secundarios (gamma={gamma}).")
+
+                # Procedemos a borrar los iones absorbidos manteniendo intacto tu código original
                 keep = ~absorbed_i
                 state.ion_positions = state.ion_positions[keep]
                 state.ion_velocities = state.ion_velocities[keep]
@@ -186,7 +219,7 @@ class SimulationEngine:
                 self.config.townsend_B,
                 self.config.electric_field,
                 self.config.gas_pressure,
-            )
+                )
             dz = np.abs(state.velocities[:, 2]) * dt
             base_prob = 1.0 - np.exp(-alpha * dz)
             probability = np.clip(base_prob * self.config.ionization_probability, 0.0, 1.0)
@@ -234,7 +267,7 @@ class SimulationEngine:
                     state.ion_velocities = np.vstack([state.ion_velocities, ion_velocities])
 
         # =====================================================
-        # 📡 TELEMETRÍA DE SEGUIMIENTO (PRE-POST RECOMBINACIÓN)
+        # 🛡️ TELEMETRÍA DE SEGUIMIENTO (PRE-POST RECOMBINACIÓN)
         # =====================================================
         iones_antes = state.ion_positions.shape[0] if state.ion_positions.size > 0 else 0
         
