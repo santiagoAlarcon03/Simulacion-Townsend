@@ -23,7 +23,7 @@ class EngineTests(unittest.TestCase):
         after = engine.state.positions.shape[0]
         self.assertEqual(after, before + 1)
         self.assertGreaterEqual(engine.state.positions.shape[0], 3)
-        self.assertGreaterEqual(engine.state.positions[-1, 2], config.gap_distance * 0.7)
+        self.assertLessEqual(engine.state.positions[-1, 2], config.gap_distance * 0.1)
 
     def test_particles_remain_visible_with_reflection(self):
         config = SimulationConfig()

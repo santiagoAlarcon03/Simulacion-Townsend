@@ -1,5 +1,4 @@
 from typing import Optional
-
 import numpy as np
 
 from config import SimulationConfig
@@ -8,116 +7,294 @@ from simulation.state import SimulationState, Stage, STAGE_ORDER
 
 
 class SimulationEngine:
+    """Motor principal de simulación física para avalanchas electrónicas y rupturas dieléctricas.
+    
+    Esta clase se encarga de gestionar el ciclo de vida, la cinemática y las interacciones 
+    de electrones y partículas neutras dentro de un dominio tridimensional bajo la 
+    influencia de un campo eléctrico constante.
+    """
+
     def __init__(self, config: SimulationConfig) -> None:
+        """Inicializa el motor de simulación con una configuración específica."""
         self.config = config
         self.rng = np.random.default_rng(config.seed)
-        self.field = field_module.ElectricField([0.0, 0.0, config.electric_field])
+        self.field = field_module.ElectricField([0.0, 0.0, -config.electric_field])
         self.state: Optional[SimulationState] = None
         self.initial_count = config.initial_particles
 
-    def reset(self, stage: Stage, n_particles: int) -> None:
+    def reset(self, stage: Stage, n_particles: int, neutral_count: int = None) -> None:
+        """Reinicia el estado de la simulación configurando una nueva etapa y partículas libres."""
         count = self._initial_count_for_stage(stage, n_particles)
-        positions, velocities = particles.initialize_electrons(count, self.config, self.rng)
+
+        positions, velocities = particles.initialize_electrons(
+            count,
+            self.config,
+            self.rng,
+        )
+
+        n_neutrals = neutral_count if neutral_count is not None else 500
+
+        neutral_positions, neutral_velocities = (
+            particles.initialize_neutral_particles(
+                n_neutrals,
+                self.config,
+                self.rng,
+            )
+        )
+
         self.state = SimulationState(
             positions=positions,
             velocities=velocities,
+            neutral_positions=neutral_positions,
+            neutral_velocities=neutral_velocities,
+            ion_positions=np.zeros((0, 3), dtype=float),
+            ion_velocities=np.zeros((0, 3), dtype=float),
             time=0.0,
             stage=stage,
         )
-        self.initial_count = count
+
+    # Fixed speeds requested by the user
+    VELOCIDAD_ELECTRON = 1_000.0  # m/s  – speed of new electrons towards the anode
+    VELOCIDAD_ION      =     100.0  # m/s  – speed of new ions towards the cathode
 
     def step(self, dt: float):
+        """Avanza la simulación un paso de tiempo diferencial (dt)."""
         if self.state is None:
             return None, None
 
         state = self.state
-        if state.positions.size == 0:
+        
+        # Mantenemos viva la simulación mientras queden electrones O iones en movimiento
+        if state.positions.size == 0 and state.ion_positions.size == 0:
             state.time += dt
-            return state, {"count": 0, "current": 0.0}
+            return state, {"count": 0, "ion_count": 0, "current": 0.0}      
 
-        acceleration = particles.acceleration_from_field(
-            self.field.vector, constants.ELECTRON_CHARGE, constants.ELECTRON_MASS
-        )
-        state.velocities = state.velocities + acceleration * dt
-        state.positions = state.positions + state.velocities * dt
+        # --- 1. CINEMÁTICA Y MOVIMIENTO DE PARTÍCULAS ---
+        if state.positions.size > 0:
+            acceleration = particles.acceleration_from_field(
+                self.field.vector, constants.ELECTRON_CHARGE, constants.ELECTRON_MASS
+            )
+            state.velocities = state.velocities + acceleration * dt
+            state.positions = state.positions + state.velocities * dt
 
+        # MOVIMIENTO DE IONES POSITIVOS
+        if state.ion_positions.size > 0:
+            ion_acceleration = particles.acceleration_from_field(
+                self.field.vector,
+                constants.ELEMENTARY_CHARGE,
+                4.65e-26,  # masa aproximada de N2+
+            )
+            ion_acceleration[2] = -np.abs(ion_acceleration[2]) * 30.0
+
+            state.ion_velocities = state.ion_velocities + ion_acceleration * dt
+            state.ion_positions = state.ion_positions + state.ion_velocities * dt
+        
+        # Movimiento del gas neutro
         if state.neutral_positions.size > 0:
             state.neutral_positions = state.neutral_positions + state.neutral_velocities * dt
 
-        self._reflect_into_domain(state.positions, state.velocities)
-        self._reflect_into_domain(state.neutral_positions, state.neutral_velocities)
+        # --- CONDICIONES DE FRONTERA ---
+        self._reflect_lateral(state.positions, state.velocities)
+        self._reflect_lateral(state.neutral_positions, state.neutral_velocities)
+        self._reflect_lateral(state.ion_positions, state.ion_velocities)
+        self._reflect_z(state.neutral_positions, state.neutral_velocities)
 
-        if state.positions.size == 0:
-            state.time += dt
-            return state, {"count": 0, "current": 0.0}
+        # Ánodo (Z = gap_distance): los electrones se depositan permanentemente
+        if state.positions.shape[0] > 0:
+            absorbed_e = state.positions[:, 2] >= self.config.gap_distance
+            if absorbed_e.any():
+                # Clamp Z to the anode surface and accumulate
+                deposited = state.positions[absorbed_e].copy()
+                deposited[:, 2] = self.config.gap_distance
+                state.anode_electrons = np.vstack([state.anode_electrons, deposited]) if state.anode_electrons.size > 0 else deposited
+                keep = ~absorbed_e
+                state.positions = state.positions[keep]
+                state.velocities = state.velocities[keep]
 
-        electron_neutral_mask, neutral_collision_mask, collision_points = collisions.detect_electron_neutral_collisions(
-            state.positions,
-            state.neutral_positions,
-            self.config.neutral_collision_radius,
-        )
-        state.collision_events = int(electron_neutral_mask.sum())
+        # Cátodo (Z = 0): los iones se depositan permanentemente + emisión secundaria gamma
+        if state.ion_positions.shape[0] > 0:
+            absorbed_i = state.ion_positions[:, 2] <= 0.0
+            if absorbed_i.any():
+                num_impacts = int(absorbed_i.sum())
+                gamma = getattr(self.config, 'secondary_emission_coeff', getattr(self.config, 'gamma', 0.05))
 
-        if electron_neutral_mask.any():
-            collisions.scatter_velocities(state.velocities, electron_neutral_mask, self.rng)
-            new_positions = self._spawn_electrons_from_collisions(collision_points, electron_neutral_mask.sum())
-            new_velocities = particles.random_directional_velocities(
-                new_positions.shape[0], self.rng, self.config.gas_temperature
+                # Emisión secundaria estocástica
+                secundarios_mask = self.rng.uniform(0.0, 1.0, size=num_impacts) < gamma
+                num_secondary_electrons = int(secundarios_mask.sum())
+
+                if num_secondary_electrons > 0:
+                    current_dtype = state.positions.dtype
+                    puntos_impacto_iones = state.ion_positions[absorbed_i][secundarios_mask]
+                    new_e_positions = puntos_impacto_iones.copy().astype(current_dtype)
+                    new_e_positions[:, 2] = 1.0e-6
+
+                    new_e_velocities = np.zeros((num_secondary_electrons, 3), dtype=current_dtype)
+                    new_e_velocities[:, 2] = self.VELOCIDAD_ELECTRON  # fijo hacia el anodo
+
+                    if state.positions.size == 0:
+                        state.positions = new_e_positions
+                        state.velocities = new_e_velocities
+                    else:
+                        state.positions = np.vstack([state.positions, new_e_positions])
+                        state.velocities = np.vstack([state.velocities, new_e_velocities])
+
+                    print(f"[AUTOSOSTENIBILIDAD] Bombardeo en Catodo! {num_impacts} iones generaron {num_secondary_electrons} electrones secundarios (gamma={gamma}).")
+
+                # Depositar iones en el cátodo (permanentemente)
+                deposited_ions = state.ion_positions[absorbed_i].copy()
+                deposited_ions[:, 2] = 0.0
+                state.cathode_ions = np.vstack([state.cathode_ions, deposited_ions]) if state.cathode_ions.size > 0 else deposited_ions
+
+                keep = ~absorbed_i
+                state.ion_positions = state.ion_positions[keep]
+                state.ion_velocities = state.ion_velocities[keep]
+
+        # 🎯 CORRECCIÓN INTEGRAL: Se eliminó el return abrupto que cortaba las colisiones y desionizaciones.
+
+        # --- 2. COLISIONES ELECTRONES-NEUTROS ---
+        state.collision_events = 0
+        if state.positions.size > 0 and state.neutral_positions.size > 0:
+            electron_neutral_mask, neutral_collision_mask, collision_points = collisions.detect_electron_neutral_collisions(
+                state.positions,
+                state.neutral_positions,
+                self.config.neutral_collision_radius,
             )
-            state.positions = np.vstack([state.positions, new_positions])
-            state.velocities = np.vstack([state.velocities, new_velocities])
+            state.collision_events = int(electron_neutral_mask.sum())
 
-        if neutral_collision_mask.any():
-            count = int(neutral_collision_mask.sum())
-            respawn_positions, respawn_velocities = particles.initialize_neutral_particles(
-                count, self.config, self.rng
+            if electron_neutral_mask.any():
+                collisions.scatter_velocities(state.velocities, electron_neutral_mask, self.rng)
+                
+                current_dtype = state.positions.dtype
+                r_recomb = getattr(self.config, 'recombination_radius', 0.001)
+                
+                # Offset to prevent immediate recombination in the same step.
+                # The electron goes towards the anode (+Z) and the ion goes towards the cathode (-Z).
+                # We separate them by 1.05 * recombination_radius along the Z axis.
+                # If we can shift the electron (+Z) without exceeding the anode (gap_distance), we do that.
+                # Otherwise, we shift the ion (-Z) towards the cathode.
+                shift_dist = 1.05 * r_recomb
+                
+                new_positions = collision_points.copy().astype(current_dtype)
+                new_ion_positions = collision_points.copy().astype(current_dtype)
+                
+                new_positions[:, 2] += shift_dist
+                new_ion_positions[:, 2] -= shift_dist
+
+                # Clip X and Y coordinates to the lateral boundaries
+                for pos in (new_positions, new_ion_positions):
+                    pos[:, 0] = np.clip(pos[:, 0], -self.config.xy_extent, self.config.xy_extent)
+                    pos[:, 1] = np.clip(pos[:, 1], -self.config.xy_extent, self.config.xy_extent)
+
+                # Electron born at collision: fixed speed directly towards the anode (+Z)
+                new_velocities = np.zeros((new_positions.shape[0], 3), dtype=current_dtype)
+                new_velocities[:, 2] = self.VELOCIDAD_ELECTRON
+
+                state.positions = np.vstack([state.positions, new_positions])
+                state.velocities = np.vstack([state.velocities, new_velocities])
+
+                # Ion born at collision: fixed speed directly towards the cathode (-Z)
+                new_ion_velocities = np.zeros((new_ion_positions.shape[0], 3), dtype=current_dtype)
+                new_ion_velocities[:, 2] = -self.VELOCIDAD_ION
+
+                if state.ion_positions is None or state.ion_positions.size == 0:
+                    state.ion_positions = new_ion_positions
+                    state.ion_velocities = new_ion_velocities
+                else:
+                    state.ion_positions = np.vstack([state.ion_positions, new_ion_positions])
+                    state.ion_velocities = np.vstack([state.ion_velocities, new_ion_velocities])
+
+            if neutral_collision_mask.any():
+                # Remove the collided neutral particles from the gas (they become ions)
+                state.neutral_positions = state.neutral_positions[~neutral_collision_mask]
+                state.neutral_velocities = state.neutral_velocities[~neutral_collision_mask]
+
+        # --- 3. COLISIONES DE FONDO (ESTOCÁSTICAS) ---
+        state.collision_events = 0  # Inicialización limpia de eventos de colisión del frame
+        if state.positions.size > 0:
+            collision_mask = collisions.sample_collisions(
+                state.positions.shape[0], self.config.collision_frequency, dt, self.rng
             )
-            state.neutral_positions[neutral_collision_mask] = respawn_positions
-            state.neutral_velocities[neutral_collision_mask] = respawn_velocities
+            collisions.scatter_velocities(state.velocities, collision_mask, self.rng)
+            state.collision_events += int(collision_mask.sum())
 
-        collision_mask = collisions.sample_collisions(
-            state.positions.shape[0], self.config.collision_frequency, dt, self.rng
-        )
-        collisions.scatter_velocities(state.velocities, collision_mask, self.rng)
-        state.collision_events += int(collision_mask.sum())
-
-        energies_ev = particles.kinetic_energy_ev(state.velocities)
-        alpha = avalanche.townsend_alpha(
-            self.config.townsend_A,
-            self.config.townsend_B,
-            self.config.electric_field,
-            self.config.gas_pressure,
-        )
-        dz = np.abs(state.velocities[:, 2]) * dt
-        base_prob = 1.0 - np.exp(-alpha * dz)
-        probability = np.clip(base_prob * self.config.ionization_probability, 0.0, 1.0)
-        ionize_mask = ionization.sample_ionization(
-            energies_ev,
-            self.config.ionization_energy_ev,
-            probability,
-            self.rng,
-        )
-        state.ionization_events = int(ionize_mask.sum())
-
-        if ionize_mask.any() and state.positions.shape[0] < self.config.max_particles:
-            max_new = self.config.max_particles - state.positions.shape[0]
-            new_count = min(int(ionize_mask.sum()), max_new)
-            new_positions = state.positions[ionize_mask][:new_count].copy()
-            new_velocities = particles.random_thermal_velocities(
-                new_count, self.rng, self.config.gas_temperature
+        # --- 4. PROCESO DE IONIZACIÓN (AVALANCHA DE TOWNSEND) ---
+        state.ionization_events = 0
+        if state.positions.size > 0:
+            energies_ev = particles.kinetic_energy_ev(state.velocities)
+            alpha = avalanche.townsend_alpha(
+                self.config.townsend_A,
+                self.config.townsend_B,
+                self.config.electric_field,
+                self.config.gas_pressure,
+                )
+            dz = np.abs(state.velocities[:, 2]) * dt
+            base_prob = 1.0 - np.exp(-alpha * dz)
+            probability = np.clip(base_prob * self.config.ionization_probability, 0.0, 1.0)
+            
+            ionize_mask = ionization.sample_ionization(
+                energies_ev,
+                self.config.ionization_energy_ev,
+                probability,
+                self.rng,
             )
-            state.positions = np.vstack([state.positions, new_positions])
-            state.velocities = np.vstack([state.velocities, new_velocities])
+            state.ionization_events = int(ionize_mask.sum())
 
+            if ionize_mask.any() and state.positions.shape[0] < self.config.max_particles:
+                max_new = self.config.max_particles - state.positions.shape[0]
+                new_count = min(int(ionize_mask.sum()), max_new)
+
+                new_positions = state.positions[ionize_mask][:new_count].copy()
+                # Townsend electron: fixed speed directly towards the anode
+                new_velocities = np.zeros((new_count, 3), dtype=state.positions.dtype)
+                new_velocities[:, 2] = self.VELOCIDAD_ELECTRON
+
+                state.positions = np.vstack([state.positions, new_positions])
+                state.velocities = np.vstack([state.velocities, new_velocities])
+
+                # Townsend ion: born close to parent electron, fixed speed towards cathode
+                current_dtype = state.positions.dtype
+                r_recomb = getattr(self.config, 'recombination_radius', 0.001)
+                ion_offsets = self.rng.uniform(r_recomb * 1.5, r_recomb * 2.5, size=(new_count, 3))
+                ion_offsets *= self.rng.choice([-1, 1], size=(new_count, 3))
+                ion_positions = (new_positions + ion_offsets).reshape(-1, 3).astype(current_dtype)
+
+                ion_velocities = np.zeros((new_count, 3), dtype=current_dtype)
+                ion_velocities[:, 2] = -self.VELOCIDAD_ION  # towards cathode
+
+                if state.ion_positions is None or state.ion_positions.size == 0:
+                    state.ion_positions = ion_positions
+                    state.ion_velocities = ion_velocities
+                else:
+                    state.ion_positions = np.vstack([state.ion_positions, ion_positions])
+                    state.ion_velocities = np.vstack([state.ion_velocities, ion_velocities])
+
+        # =====================================================
+        # 🛡️ TELEMETRÍA DE SEGUIMIENTO (PRE-POST RECOMBINACIÓN)
+        # =====================================================
+        iones_antes = state.ion_positions.shape[0] if state.ion_positions.size > 0 else 0
+        
+        # Evaluamos la recombinación una ÚNICA vez por frame
+        self.check_recombination()
+        
+        iones_despues = state.ion_positions.shape[0] if state.ion_positions.size > 0 else 0
+        
+        if iones_antes > 0 or state.ionization_events > 0:
+            print(f"[TRACKER] Creados Townsend: {state.ionization_events} | En memoria ANTES de recombinar: {iones_antes} | DESPUES: {iones_despues}")
+        # =====================================================
+
+        # --- 5. ACTUALIZACIÓN DEL ESTADO FINAL Y MÉTRICAS ---
         state.time += dt
         state.stage = self._infer_stage(state)
 
         area = (2.0 * self.config.xy_extent) ** 2
-        current = particles.estimate_current(
-            state.velocities, constants.ELECTRON_CHARGE, area
-        )
+        current = 0.0
+        if state.positions.size > 0:
+            current = particles.estimate_current(state.velocities, constants.ELECTRON_CHARGE, area)
 
-        return state, {"count": int(state.positions.shape[0]), "current": float(current)}
+        e_len = int(state.positions.shape[0]) if state.positions.size > 0 else 0
+        i_len = int(state.ion_positions.shape[0]) if state.ion_positions.size > 0 else 0
+
+        return state, {"count": e_len, "ion_count": i_len, "current": float(current)}
 
     def _spawn_electrons_from_collisions(self, collision_points: np.ndarray, count: int) -> np.ndarray:
         if count <= 0 or collision_points.size == 0:
@@ -125,29 +302,38 @@ class SimulationEngine:
         collision_points = np.asarray(collision_points, dtype=float)
         if collision_points.shape[0] != count:
             count = collision_points.shape[0]
+            
         directions = particles.random_directional_velocities(count, self.rng, self.config.gas_temperature)
         offsets = directions * 1.0e-6
         positions = collision_points[:count] + offsets
+        
         positions[:, 0] = np.clip(positions[:, 0], -self.config.xy_extent, self.config.xy_extent)
         positions[:, 1] = np.clip(positions[:, 1], -self.config.xy_extent, self.config.xy_extent)
         positions[:, 2] = np.clip(positions[:, 2], 0.0, self.config.gap_distance)
         return positions
 
-    def _reflect_into_domain(self, positions: np.ndarray, velocities: np.ndarray) -> None:
-        """Keep particles inside the visual domain by reflecting them on the walls."""
-        extent = self.config.xy_extent
-        gap = self.config.gap_distance
+    def _reflect_lateral(self, positions: np.ndarray, velocities: np.ndarray) -> None:
+        """Aplica rebote elástico sólo en las paredes laterales X e Y.
 
+        Los electrodos (Z=0 y Z=gap) se tratan por separado con absorción.
+        """
+        if positions.size == 0:
+            return
+        extent = self.config.xy_extent
         for axis in (0, 1):
             upper = positions[:, axis] > extent
             lower = positions[:, axis] < -extent
             if np.any(upper):
                 positions[upper, axis] = 2.0 * extent - positions[upper, axis]
-                velocities[upper, axis] *= -1.0
+                velocities[upper, axis] *= -0.2
             if np.any(lower):
                 positions[lower, axis] = -2.0 * extent - positions[lower, axis]
-                velocities[lower, axis] *= -1.0
+                velocities[lower, axis] *= -0.2
 
+    def _reflect_z(self, positions: np.ndarray, velocities: np.ndarray) -> None:
+        if positions.size == 0:
+            return
+        gap = self.config.gap_distance
         upper_z = positions[:, 2] > gap
         lower_z = positions[:, 2] < 0.0
         if np.any(upper_z):
@@ -169,11 +355,11 @@ class SimulationEngine:
         stage = self._max_stage(stage, Stage.FIELD_ACCELERATION)
         if state.collision_events > 0:
             stage = self._max_stage(stage, Stage.COLLISIONS)
-        if state.ionization_events > 0:
+        if getattr(state, 'ionization_events', 0) > 0:
             stage = self._max_stage(stage, Stage.IONIZATION)
-        if state.positions.shape[0] >= self.initial_count * 2:
+        if state.positions.size > 0 and state.positions.shape[0] >= self.initial_count * 2:
             stage = self._max_stage(stage, Stage.AVALANCHE)
-        if state.positions.shape[0] >= self.initial_count * 8:
+        if state.positions.size > 0 and state.positions.shape[0] >= self.initial_count * 8:
             stage = self._max_stage(stage, Stage.EXPONENTIAL_GROWTH)
         if breakdown.is_self_sustained(self.config):
             stage = self._max_stage(stage, Stage.SELF_SUSTAINED)
@@ -187,86 +373,125 @@ class SimulationEngine:
         return current
 
     def add_electron(self, position: list | None = None, velocity: list | None = None) -> None:
-        """Add a single electron to the current simulation state.
-
-        If `position` or `velocity` are not provided, generate them using
-        the same initialization strategy as `initialize_electrons`.
-        """
+        """Inyecta un electrón garantizando una posición inicial baja (Cátodo Z=0) para dar tiempo a colisionar."""
         if self.state is None:
-            # If there's no state yet, initialize a single electron at default stage
             self.reset(Stage.INITIAL_ELECTRONS, 1)
             return
 
-        if self.state.positions.shape[0] >= self.config.max_particles:
+        if self.state.positions.size > 0 and self.state.positions.shape[0] >= self.config.max_particles:
             return
 
-        import numpy as _np
-
-        # create position
+        # Forzamos la inyección en la base (Z próximo a 0) para que recorra todo el GAP acelerando
         if position is None:
-            pos = self._sample_visible_position()
+            pos = np.array([[
+                self.rng.uniform(-self.config.xy_extent * 0.5, self.config.xy_extent * 0.5),
+                self.rng.uniform(-self.config.xy_extent * 0.5, self.config.xy_extent * 0.5),
+                self.config.gap_distance * 0.05  # ⚡ Próximo al cátodo
+            ]], dtype=float)
         else:
-            pos = _np.asarray(position, dtype=float).reshape(1, 3)
+            pos = np.asarray(position, dtype=float).reshape(1, 3)
 
-        # create velocity
         if velocity is None:
-            # assign a random direction with thermal magnitude
-            vel = particles.random_directional_velocities(
-                1, self.rng, self.config.gas_temperature
-            )
+            vel = particles.random_directional_velocities(1, self.rng, self.config.gas_temperature)
         else:
-            vel = _np.asarray(velocity, dtype=float).reshape(1, 3)
+            vel = np.asarray(velocity, dtype=float).reshape(1, 3)
 
         if self.state.positions.size == 0:
             self.state.positions = pos
             self.state.velocities = vel
         else:
-            self.state.positions = _np.vstack([self.state.positions, pos])
-            self.state.velocities = _np.vstack([self.state.velocities, vel])
+            self.state.positions = np.vstack([self.state.positions, pos])
+            self.state.velocities = np.vstack([self.state.velocities, vel])
 
     def add_neutral(self, position: list | None = None, velocity: list | None = None) -> None:
-        """Add a neutral particle that floats randomly inside the 3D cube."""
         if self.state is None:
             self.reset(Stage.INITIAL_ELECTRONS, 1)
-
-        if self.state is None:
             return
 
         if self.state.neutral_positions.shape[0] >= self.config.max_particles:
             return
 
-        import numpy as _np
-
         if position is None:
-            pos = self._sample_visible_position()
+            pos = np.array([[
+                self.rng.uniform(-self.config.xy_extent, self.config.xy_extent),
+                self.rng.uniform(-self.config.xy_extent, self.config.xy_extent),
+                self.rng.uniform(0.0, self.config.gap_distance)
+            ]], dtype=float)
         else:
-            pos = _np.asarray(position, dtype=float).reshape(1, 3)
+            pos = np.asarray(position, dtype=float).reshape(1, 3)
 
         if velocity is None:
             vel = particles.random_thermal_velocities(1, self.rng, self.config.gas_temperature * 0.5)
         else:
-            vel = _np.asarray(velocity, dtype=float).reshape(1, 3)
+            vel = np.asarray(velocity, dtype=float).reshape(1, 3)
 
         if self.state.neutral_positions.size == 0:
             self.state.neutral_positions = pos
             self.state.neutral_velocities = vel
         else:
-            self.state.neutral_positions = _np.vstack([self.state.neutral_positions, pos])
-            self.state.neutral_velocities = _np.vstack([self.state.neutral_velocities, vel])
+            self.state.neutral_positions = np.vstack([self.state.neutral_positions, pos])
+            self.state.neutral_velocities = np.vstack([self.state.neutral_velocities, vel])
 
-    def _sample_visible_position(self) -> np.ndarray:
-        """Sample a position that is not too close to existing particles."""
-        min_distance = max(self.config.xy_extent, self.config.gap_distance) * 0.30
-        for _ in range(64):
-            candidate = np.array([
-                self.rng.uniform(-self.config.xy_extent, self.config.xy_extent),
-                self.rng.uniform(-self.config.xy_extent, self.config.xy_extent),
-                self.rng.uniform(self.config.gap_distance * 0.70, self.config.gap_distance * 0.95),
-            ], dtype=float).reshape(1, 3)
-            if self.state is None or self.state.positions.size == 0:
-                return candidate
-            distances = np.linalg.norm(self.state.positions - candidate, axis=1)
-            if np.all(distances >= min_distance):
-                return candidate
-        # fallback: place it at the center-top if we fail to find a clear spot
-        return np.array([[0.0, 0.0, self.config.gap_distance * 0.9]], dtype=float)
+    def check_recombination(self):
+        """Detecta la desionización comparando las matrices de posiciones de NumPy de manera dinámica."""
+        state = self.state
+        safe_dtype = state.positions.dtype if state.positions.size > 0 else np.float32
+        
+        if state.positions.size == 0 or state.ion_positions.size == 0:
+            state.recombined_pos = np.empty((0, 3), dtype=safe_dtype)
+            return
+
+        recombined_this_frame = 0
+        e_indices_a_borrar = []
+        ion_indices_a_borrar = []
+        puntos_de_impacto = []
+
+        radius = getattr(self.config, 'recombination_radius', 0.001)
+        threshold_sq = radius ** 2
+        electrones_disponibles = np.ones(state.positions.shape[0], dtype=bool)
+
+        for ion_idx, ion_pos in enumerate(state.ion_positions):
+            if not np.any(electrones_disponibles):
+                break
+            
+            deltas = state.positions[electrones_disponibles] - ion_pos
+            distances_sq = np.sum(deltas * deltas, axis=1)
+            
+            if distances_sq.size == 0:
+                break
+
+            closest_rel_idx = int(np.argmin(distances_sq))
+            
+            if distances_sq[closest_rel_idx] <= threshold_sq:
+                indices_reales = np.where(electrones_disponibles)[0]
+                closest_real_idx = indices_reales[closest_rel_idx]
+                
+                e_indices_a_borrar.append(closest_real_idx)
+                ion_indices_a_borrar.append(ion_idx)
+                puntos_de_impacto.append(ion_pos)
+                recombined_this_frame += 1
+                electrones_disponibles[closest_real_idx] = False
+
+        if recombined_this_frame > 0:
+            state.recombined_pos = np.array(puntos_de_impacto, dtype=state.positions.dtype)
+
+            mask_e = np.ones(state.positions.shape[0], dtype=bool)
+            mask_e[e_indices_a_borrar] = False
+            
+            mask_ion = np.ones(state.ion_positions.shape[0], dtype=bool)
+            mask_ion[ion_indices_a_borrar] = False
+
+            state.positions = state.positions[mask_e]
+            state.velocities = state.velocities[mask_e]
+            
+            state.ion_positions = state.ion_positions[mask_ion]
+            state.ion_velocities = state.ion_velocities[mask_ion]
+            
+            if hasattr(state, 'total_recombinations'):
+                state.total_recombinations += recombined_this_frame
+            else:
+                state.total_recombinations = recombined_this_frame
+                
+            print(f"--> EXITO! Se recombinaron {recombined_this_frame} particulas reales en este paso.")
+        else:
+            state.recombined_pos = np.empty((0, 3), dtype=safe_dtype)
